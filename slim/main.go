@@ -1,10 +1,10 @@
+// A Dagger module to Slim application container image size
 package main
 
 import (
 	"context"
 	"fmt"
 	"runtime"
-	"strings"
 )
 
 const (
@@ -19,7 +19,7 @@ const (
 
 	flagDebug = "--debug"
 	trueValue = "true"
-	cmdSlim  = "slim"
+	cmdSlim   = "slim"
 
 	modeDocker = "docker"
 	modeNative = "native"
@@ -79,54 +79,61 @@ type Slim struct {
 func (s *Slim) Slim(
 	ctx context.Context,
 	container *Container,
-	mode Optional[string],
-	probeHttp Optional[bool],
-	probeHttpExitOnFailure Optional[bool],
-	publishExposedPorts Optional[bool],
-	probeHttpPorts Optional[string], //comma separated list
-	continueAfter Optional[string],
-	showClogs Optional[bool],
-	slimDebug Optional[bool],
+	// Execution mode to use
+	// +optional
+	// +default="docker"
+	mode string,
+	// Enable running HTTP probes against the temporary container (test to false to disable)
+	// +optional
+	// +default=true
+	probeHttp bool,
+	// Probe HTTP - exit when all HTTP probe commands fail
+	// +optional
+	// +default=true
+	probeHttpExitOnFailure bool,
+	// Probe HTTP - comma separated subset of ports to probe
+	// +optional
+	probeHttpPorts string,
+	// Map all exposed ports to the same host ports analyzing image at runtime
+	// +optional
+	// +default=true
+	publishExposedPorts bool,
+	// Select when to start processing the collected telemetry - enter | signal | probe | exec | timeout-number-in-seconds | container.probe (can combine probe and exec like this: probe&exe)
+	// +optional
+	continueAfter string,
+	// Show container logs from the container used to perform dynamic inspection
+	// +optional
+	// +default=false
+	showClogs bool,
+	// Show debugging information
+	// +optional
+	// +default=false
+	slimDebug bool,
 ) (*Container, error) {
-	paramMode := mode.GetOr(modeDocker)
-	paramProbeHttp := probeHttp.GetOr(true)
-	paramProbeHttpPorts := probeHttpPorts.GetOr("")
-	paramProbeHttpExitOnFailure := probeHttpExitOnFailure.GetOr(true)
-	paramPublishExposedPorts := publishExposedPorts.GetOr(true)
-	paramContinueAfter := continueAfter.GetOr("")
-	paramShowClogs := showClogs.GetOr(false)
-	paramDebug := slimDebug.GetOr(false)
-
-	switch paramMode {
+	switch mode {
 	case modeDocker, modeNative:
 	default:
-		paramMode = modeDocker
+		mode = modeDocker
 	}
 
-	if paramMode != modeDocker {
-		return nil, fmt.Errorf("unsupported mode - %s", paramMode)
+	if mode != modeDocker {
+		return nil, fmt.Errorf("unsupported mode - %s", mode)
 	}
 
 	// Start an ephemeral dockerd
-	dockerd := dag.Dockerd().Service()
+	dockerd := dag.Docker().Engine()
+	docker := dag.Docker().Cli(DockerCliOpts{
+		Engine: dockerd,
+	})
+
 	// Load the input container into the dockerd
-	if _, err := DockerLoad(ctx, container, dockerd); err != nil {
-		if err != nil {
-			return nil, err
-		}
-	}
-	// List images on the ephemeral dockerd
-	images, err := DockerImages(ctx, dockerd)
+	imgRef, err := docker.Import(container).Ref(ctx)
 	if err != nil {
-		return nil, err
+		return container, err
 	}
-	if len(images) == 0 {
-		return nil, fmt.Errorf("Failed to load container into ephemeral docker engine")
-	}
-	firstImage := images[0]
 
 	var cargs []string
-	if paramDebug {
+	if slimDebug {
 		cargs = append(cargs, flagDebug)
 	}
 
@@ -134,19 +141,19 @@ func (s *Slim) Slim(
 	cargs = append(cargs, "--tag")
 	cargs = append(cargs, outputImageTag)
 	cargs = append(cargs, "--target")
-	cargs = append(cargs, firstImage)
+	cargs = append(cargs, imgRef)
 
-	if paramShowClogs {
+	if showClogs {
 		cargs = append(cargs, flagShowClogs)
 	}
 
 	//pick up 'false' values too
-	cargs = append(cargs, flagHttpProbe, fmt.Sprintf("%v", paramProbeHttp))
-	cargs = append(cargs, flagHttpProbeExitOnFailure, fmt.Sprintf("%v", paramProbeHttpExitOnFailure))
-	cargs = append(cargs, flagPublishExposedPorts, fmt.Sprintf("%v", paramPublishExposedPorts))
+	cargs = append(cargs, flagHttpProbe, fmt.Sprintf("%v", probeHttp))
+	cargs = append(cargs, flagHttpProbeExitOnFailure, fmt.Sprintf("%v", probeHttpExitOnFailure))
+	cargs = append(cargs, flagPublishExposedPorts, fmt.Sprintf("%v", publishExposedPorts))
 
-	if paramProbeHttpPorts != "" {
-		cargs = append(cargs, flagHttpProbePorts, paramProbeHttpPorts)
+	if probeHttpPorts != "" {
+		cargs = append(cargs, flagHttpProbePorts, probeHttpPorts)
 	}
 
 	for _, val := range s.exposePorts {
@@ -190,8 +197,8 @@ func (s *Slim) Slim(
 		cargs = append(cargs, flagEnv, val)
 	}
 
-	if paramContinueAfter != "" {
-		cargs = append(cargs, flagContinueAfter, paramContinueAfter)
+	if continueAfter != "" {
+		cargs = append(cargs, flagContinueAfter, continueAfter)
 	}
 
 	if s.sensorIPCMode != "" {
@@ -227,7 +234,7 @@ func (s *Slim) Slim(
 	}
 
 	//reuse the param to show the constructed command line:
-	if paramDebug {
+	if slimDebug {
 		fmt.Printf("Slim(Toolkit) params: %#v\n", cargs)
 	}
 
@@ -246,29 +253,54 @@ func (s *Slim) Slim(
 	}
 
 	// Extract the resulting image back into a container
-	outputArchive := DockerClient(dockerd).WithExec([]string{
-		"image", "save",
-		outputImageTag,
-		// firstImage, // For now we output the un-slimeed image, while we debug
-		"-o", outputImageTar}).
-		File(outputImageTar)
-	return dag.Container().Import(outputArchive), nil
+	return docker.Image(DockerCliImageOpts{
+		Repository: "slim-output",
+		Tag:        "latest",
+	}).Export(), nil
 }
 
 func (s *Slim) Compare(
 	ctx context.Context,
 	container *Container,
-	showClogs Optional[bool],
-	slimDebug Optional[bool],
+	// Execution mode to use
+	// +optional
+	// +default="docker"
+	mode string,
+	// Run HTTP probes against the temporary container
+	// +optional
+	// +default=true
+	probeHttp bool,
+	// Probe HTTP - exit on failure - TBD - add real desc
+	// +optional
+	// +default=true
+	probeHttpExitOnFailure bool,
+	// Probe HTTP - comma separated subset of ports to probe
+	// +optional
+	probeHttpPorts string,
+	// Probe HTTP - publish exposed ports - TBD - add real desc
+	// +optional
+	// +default=true
+	publishExposedPorts bool,
+	// Continue after mode - TBD - add real desc
+	// +optional
+	continueAfter string,
+	// Show temporary container logs - TBD - add real desc
+	// +optional
+	// +default=false
+	showClogs bool,
+	// Show debug messages - TBD - add real desc
+	// +optional
+	// +default=false
+	slimDebug bool,
 ) (*Container, error) {
-	slimmed, err := s.Minify(ctx,
+	slimmed, err := s.Slim(ctx,
 		container,
-		OptEmpty[string](), //mode
-		OptEmpty[bool](),   //probeHTTP
-		OptEmpty[bool](),   //probeHTTPExitOnFailure
-		OptEmpty[bool](),   //publishExposedPorts
-		OptEmpty[string](), //probeHTTPPorts
-		OptEmpty[string](), //continueAfter
+		mode,
+		probeHttp,
+		probeHttpExitOnFailure,
+		probeHttpPorts,
+		publishExposedPorts,
+		continueAfter,
 		showClogs,
 		slimDebug)
 	if err != nil {
@@ -278,8 +310,8 @@ func (s *Slim) Compare(
 	debug := dag.
 		Container().
 		From("alpine").
-		WithMountedDirectory("/image.before", slimmed.Rootfs()).
-		WithMountedDirectory("/image.after", container.Rootfs())
+		WithMountedDirectory("before", slimmed.Rootfs()).
+		WithMountedDirectory("after", container.Rootfs())
 	return debug, nil
 }
 
@@ -386,31 +418,4 @@ func engineImage() string {
 	default:
 		return "" //let it error :)
 	}
-}
-
-func DockerImages(ctx context.Context, dockerd *Service) ([]string, error) {
-	raw, err := DockerClient(dockerd).
-		WithExec([]string{"image", "list", "--no-trunc", "--format", "{{.ID}}"}).
-		Stdout(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return strings.Split(raw, "\n"), nil
-}
-
-func DockerClient(dockerd *Service) *Container {
-	return dag.
-		Container().
-		From("index.docker.io/docker:cli").
-		WithServiceBinding("dockerd", dockerd).
-		WithEnvVariable("DOCKER_HOST", "tcp://dockerd:2375")
-}
-
-// Load a container into a docker engine
-func DockerLoad(ctx context.Context, c *Container, dockerd *Service) (string, error) {
-	client := DockerClient(dockerd).
-		WithMountedFile("/tmp/container.tar", c.AsTarball())
-	stdout, err := client.WithExec([]string{"load", "-i", "/tmp/container.tar"}).Stdout(ctx)
-	// FIXME: parse stdout
-	return stdout, err
 }

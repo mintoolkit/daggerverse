@@ -2,6 +2,11 @@
   "name": "slim",
   "sdk": "go",
   "dependencies": [
-    "github.com/kpenfound/dagger-modules/dockerd@ec3133891c9cea4ec964c6fb597e62567dfecc7e"
-  ]
+    {
+      "name": "docker",
+      "source": "github.com/shykes/daggerverse/docker@3338120927f8e291c4780de691ef63a7c9d825c0"
+    }
+  ],
+  "source": ".",
+  "engineVersion": "v0.10.2"
 }
