@@ -2,9 +2,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"runtime"
+	"encoding/json"
 )
 
 const (
@@ -126,8 +128,41 @@ func (s *Slim) Slim(
 		Engine: dockerd,
 	})
 
+	//////
+	imgListBefore, err := docker.Images(ctx)
+	if err != nil {
+		return container, err
+	}
+
+	fmt.Printf("IMG LIST (BEFORE): %s\n\n", toString(imgListBefore, true))
+	//////
+
 	// Load the input container into the dockerd
-	imgRef, err := docker.Import(container).Ref(ctx)
+	importedImg := docker.Import(container)
+	/*
+	importedImgRef, err := docker.Import(container)
+	if err != nil {
+		return container, err
+	}
+	*/
+
+	imageID, err := importedImg.LocalID(ctx)
+	if err != nil {
+		return container, err
+	}
+
+	/*
+	imgList, err := docker.Images(ctx)
+	if err != nil {
+		return container, err
+	}
+
+	fmt.Printf("IMG LIST: %s\n\n", toString(imgList, true))
+	*/
+
+	imgRef, err := docker.Image(DockerCliImageOpts{
+		LocalID: imageID,
+	}).Ref(ctx)
 	if err != nil {
 		return container, err
 	}
@@ -418,4 +453,15 @@ func engineImage() string {
 	default:
 		return "" //let it error :)
 	}
+}
+
+func toString(input interface{}, pretty bool) string {
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	if pretty {
+		encoder.SetIndent(" ", " ")
+	}
+	_ = encoder.Encode(input)
+	return out.String()
 }
